@@ -124,11 +124,16 @@ if wait_gone pr-1; then ok "pr-1 deleted on PR close"; else bad "pr-1 still exis
 step "info only: is NetworkPolicy enforced on this cluster?"
 "$here/preview.sh" create 5 3600
 kubectl -n pr-5 rollout status deployment/app --timeout=180s
-if kubectl run np-probe --rm -i --restart=Never --quiet --image=curlimages/curl:8.11.1 -- curl -fsS --max-time 4 http://app.pr-5.svc/ >/dev/null 2>&1; then
-  echo "  INFO  cross-namespace request SUCCEEDED: NetworkPolicy is not enforced here"
-else
-  echo "  INFO  cross-namespace request was BLOCKED: NetworkPolicy is enforced here"
-fi
+# curl exit codes tell the cases apart: 0 = reached the app, 28 = timed out (what a dropped packet looks like),
+# 6 = DNS failure, 7 = connection refused. Only 28 is evidence of a NetworkPolicy drop.
+probe="$(kubectl run np-probe --rm -i --restart=Never --quiet --image=curlimages/curl:8.11.1 --command -- \
+  sh -c 'curl -sS -o /dev/null --max-time 5 http://app.pr-5.svc/ 2>/dev/null; echo curl-exit=$?' 2>/dev/null | tr -d '\r' | grep -o 'curl-exit=[0-9]*' || true)"
+echo "  INFO  cross-namespace probe result: ${probe:-no result}"
+case "$probe" in
+  curl-exit=0) echo "  INFO  request SUCCEEDED: NetworkPolicy is not enforced on this cluster" ;;
+  curl-exit=28) echo "  INFO  request TIMED OUT: consistent with NetworkPolicy dropping the traffic" ;;
+  *) echo "  INFO  inconclusive: the request failed for a reason other than a timeout" ;;
+esac
 "$here/preview.sh" delete 5
 
 echo
