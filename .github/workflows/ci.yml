@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck scripts/*.sh
+      - name: Render the preview template and validate it (kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          PR=1 EXPIRES=1 envsubst '${PR} ${EXPIRES}' < preview/preview.yaml.tmpl | ./kubeconform -strict -summary -kubernetes-version 1.33.0
+          ./kubeconform -strict -summary -kubernetes-version 1.33.0 deploy/reaper/reaper.yaml
+
+  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: previews
+          wait: 120s
+      - name: Preview lifecycle, quota, pod security, reaper (CLI and CronJob)
+        run: scripts/e2e.sh
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get ns --show-labels || true
+          kubectl get all -A || true
+          kubectl -n preview-system logs job/manual-run || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true

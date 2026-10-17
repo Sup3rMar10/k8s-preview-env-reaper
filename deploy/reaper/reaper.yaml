@@ -1,0 +1,89 @@
+# Runs the reaper inside the cluster on a schedule. The script itself is not in this file: create the
+# ConfigMap from scripts/reaper.sh so there is exactly one copy of the logic:
+#   kubectl -n preview-system create configmap reaper-script --from-file=scripts/reaper.sh
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: preview-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: preview-reaper
+  namespace: preview-system
+---
+# Least privilege: it can list namespaces and delete them, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: preview-reaper
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: preview-reaper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: preview-reaper
+subjects:
+  - kind: ServiceAccount
+    name: preview-reaper
+    namespace: preview-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: preview-reaper
+  namespace: preview-system
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          serviceAccountName: preview-reaper
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              image: alpine/k8s:1.33.1
+              command: ["sh", "/scripts/reaper.sh"]
+              env:
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: script
+              configMap:
+                name: reaper-script
+            - name: tmp
+              emptyDir: {}
